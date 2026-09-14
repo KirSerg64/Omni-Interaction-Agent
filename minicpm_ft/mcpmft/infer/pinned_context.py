@@ -214,10 +214,10 @@ class PinnedContextController:
                 changed = True
             return changed
 
-    def refresh(self) -> bool:
+    def refresh(self, *, force: bool = False) -> bool:
         with self._lock:
             tokens, rendered = self._render_tokens()
-            if tokens == self._last_tokens:
+            if not force and tokens == self._last_tokens:
                 return False
             if getattr(self.decoder, "cache", None) is None:
                 return False
@@ -339,7 +339,8 @@ class PinnedContextController:
             max(float(entry.get("end_sec", self._dropped_until_sec)) for entry in entries),
         )
         self._requested_oldest_unit = None
-        self.refresh()
+        # Unit eviction changes the cache suffix even when protected tokens are unchanged.
+        self.refresh(force=True)
         self.decoder._sliding_event_count = int(
             getattr(self.decoder, "_sliding_event_count", 0)
         ) + 1
