@@ -510,8 +510,8 @@ The main deployment choices live in the serving YAML:
 If you find Gander useful in your research, please cite:
 
 ```bibtex
-@misc{orantqing2026omniinteractionagenttechnical,
-      title={Omni Interaction Agent Technical Report}, 
+@misc{orantqing2026multimodalduplexinteractionagent,
+      title={Multimodal Duplex Interaction Agent}, 
       author={Orantqing and Shengpeng Ji and Junlong Tong and Jialong Zuo and Dongjie Fu and Di Cao and Yangzhuo Li and Shangda Wu and Franz and Evan and Theron Veyra and Changhao Pan and Jingyu Lu and Dongchao Yang and Zhifei Xie and Yang Tan and Xiaoyu Shen and Xiaoda Yang and Wenfu Wang and Teddy Sun and Steve Yves and Zhou Zhao},
       year={2026},
       eprint={2609.08977},
