@@ -1056,7 +1056,7 @@ def _prepare_codex_home(config: CodexCoordinatorConfig) -> Path:
     ).expanduser().resolve()
     if source == destination:
         return destination
-    for name in ("auth.json", "models_cache.json", "version.json"):
+    for name in ("auth.json", "config.toml", "models_cache.json", "version.json"):
         source_file = source / name
         destination_file = destination / name
         if source_file.is_file() and not destination_file.exists():
