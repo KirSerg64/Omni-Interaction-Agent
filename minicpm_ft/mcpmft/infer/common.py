@@ -82,10 +82,19 @@ def load_for_infer(
     model.eval()
     import torch
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("Gander inference requires CUDA")
     if inference_args.device_map is None:
-        model.to("cuda")
+        npu = getattr(torch, "npu", None)
+        if npu is not None and callable(getattr(npu, "is_available", None)):
+            if npu.is_available():
+                model.to("npu")
+            elif torch.cuda.is_available():
+                model.to("cuda")
+            else:
+                raise RuntimeError("Gander inference requires Ascend NPU or CUDA")
+        elif torch.cuda.is_available():
+            model.to("cuda")
+        else:
+            raise RuntimeError("Gander inference requires Ascend NPU or CUDA")
     return InferBundle(model=model, tokenizer=tokenizer, processor=processor)
 
 

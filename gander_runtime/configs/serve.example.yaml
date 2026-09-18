@@ -11,7 +11,7 @@ model:
   token2wav_n_timesteps: 10
   token2wav_enable_float16: false
   low_cpu_mem_usage: true
-  device_map: cuda
+  device_map: null
 
 server:
   host: 127.0.0.1
@@ -20,25 +20,18 @@ server:
   ledger_dir: /tmp/gander/gateway
   mode: lean
   log_level: info
-  cuda_visible_devices: "0,1"
+  accelerator_visible_devices_env: ASCEND_RT_VISIBLE_DEVICES
+  accelerator_visible_devices: "0"
 
 asr:
-  mode: managed
-  model_path: /path/to/faster-whisper-large-v3
-  host: 127.0.0.1
-  port: 8995
-  cuda_visible_devices: "2"
-  device: cuda
-  device_index: 0
-  compute_type: float16
-  beam_size: 3
-  startup_timeout_sec: 900.0
+  mode: external
+  url: http://127.0.0.1:8995
   request_timeout_sec: 120.0
 
 duplex:
   checkpoint: /path/to/gander-thinker-checkpoint
   talker_checkpoint: /path/to/gander-talker-checkpoint
-  detached_talker_device: cuda:1
+  detached_talker_device: null
   talker_emit_speech_tokens: 25
   generate_audio: true
   decode_mode: sampling
@@ -71,13 +64,15 @@ duplex:
   warm_first_unit: true
 
 worker:
-  provider: codex
+  provider: openai_vllm
   cwd: ../workspace
   profile: full
   settings:
-    codex_bin: codex
-    model: null
-    reasoning_effort: medium
-    codex_home: null
-    sandbox: workspace-write
-    approval_policy: on-request
+    base_url: http://127.0.0.1:8001/v1
+    model: Qwen3-30B-Omni-A3B-Instruct
+    timeout_sec: 120.0
+    api_key_env: OPENAI_API_KEY
+    system_prompt: ""
+    temperature: 0.2
+    top_p: 0.95
+    max_tokens: 2048

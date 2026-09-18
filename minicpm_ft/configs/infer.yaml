@@ -9,7 +9,7 @@ model:
   init_tts: false
   token2wav_dir: null
   low_cpu_mem_usage: true
-  device_map: cuda
+  device_map: null
 
 inference:
   mode: turn

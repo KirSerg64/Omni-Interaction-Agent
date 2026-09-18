@@ -31,6 +31,8 @@ class ServerConfig:
     mode: Literal["lean", "coordinator"] = "lean"
     log_level: str = "info"
     context_max_events: int = 512
+    accelerator_visible_devices: str | None = None
+    accelerator_visible_devices_env: str = "CUDA_VISIBLE_DEVICES"
     cuda_visible_devices: str | None = None
 
 
@@ -277,7 +279,7 @@ def preflight_config(config: ReleaseConfig) -> None:
             raise RuntimeError(
                 "managed ASR requires faster-whisper; install minicpm_ft[asr]"
             )
-    _validate_gpu_assignment(config)
+    _validate_accelerator_assignment(config)
 
 
 def _require_path(label: str, value: str) -> Path:
@@ -311,51 +313,78 @@ def _require_executable(label: str, command: str) -> None:
         )
 
 
-def _cuda_devices(value: str | None) -> tuple[str, ...]:
+def _visible_devices(value: str | None, *, env_name: str) -> tuple[str, ...]:
     if value is None:
         return ()
     devices = tuple(item.strip() for item in value.split(",") if item.strip())
     if not devices:
-        raise ValueError("CUDA_VISIBLE_DEVICES must contain at least one device")
+        raise ValueError(f"{env_name} must contain at least one device")
     if len(set(devices)) != len(devices):
-        raise ValueError("CUDA_VISIBLE_DEVICES must not contain duplicates")
+        raise ValueError(f"{env_name} must not contain duplicates")
     return devices
 
 
-def _validate_gpu_assignment(config: ReleaseConfig) -> None:
-    server_devices = _cuda_devices(config.server.cuda_visible_devices)
+def _server_visible_devices(config: ReleaseConfig) -> str | None:
+    return config.server.accelerator_visible_devices or config.server.cuda_visible_devices
+
+
+def _validate_accelerator_assignment(config: ReleaseConfig) -> None:
+    server_env = config.server.accelerator_visible_devices_env
+    if not server_env:
+        raise ValueError("server.accelerator_visible_devices_env must not be empty")
+    server_devices = _visible_devices(
+        _server_visible_devices(config),
+        env_name=server_env,
+    )
     talker_device = config.duplex.detached_talker_device
     if talker_device:
-        if not talker_device.startswith("cuda:"):
-            raise ValueError("duplex.detached_talker_device must be cuda:<index>")
+        if ":" not in talker_device:
+            raise ValueError(
+                "duplex.detached_talker_device must be <backend>:<index>"
+            )
+        backend, index = talker_device.split(":", 1)
+        if backend not in {"cuda", "npu"}:
+            raise ValueError(
+                "duplex.detached_talker_device backend must be cuda or npu"
+            )
         try:
-            talker_index = int(talker_device.removeprefix("cuda:"))
+            talker_index = int(index)
         except ValueError as exc:
             raise ValueError(
-                "duplex.detached_talker_device must be cuda:<index>"
+                "duplex.detached_talker_device must be <backend>:<index>"
             ) from exc
         if talker_index < 0:
-            raise ValueError("detached Talker CUDA index must not be negative")
+            raise ValueError("detached Talker index must not be negative")
         if server_devices and talker_index >= len(server_devices):
             raise ValueError(
-                "detached Talker CUDA index is outside server.cuda_visible_devices"
+                "detached Talker index is outside server visible device assignment"
             )
 
     if config.asr.mode != "managed" or config.asr.device != "cuda":
         return
-    asr_devices = _cuda_devices(config.asr.cuda_visible_devices)
+    asr_devices = _visible_devices(
+        config.asr.accelerator_visible_devices or config.asr.cuda_visible_devices,
+        env_name=config.asr.accelerator_visible_devices_env,
+    )
     if not server_devices or not asr_devices:
         raise ValueError(
-            "managed CUDA ASR requires explicit, separate server.cuda_visible_devices "
-            "and asr.cuda_visible_devices"
+            "managed CUDA ASR requires explicit, separate server and asr "
+            "visible device assignments"
         )
     overlap = sorted(set(server_devices) & set(asr_devices))
     if overlap:
         raise ValueError(
-            "ASR and Gander CUDA assignments overlap: " + ", ".join(overlap)
+            "ASR and Gander visible device assignments overlap: "
+            + ", ".join(overlap)
         )
     if config.asr.device_index >= len(asr_devices):
-        raise ValueError("asr.device_index is outside asr.cuda_visible_devices")
+        raise ValueError("asr.device_index is outside ASR visible device assignment")
+
+
+def _validate_gpu_assignment(config: ReleaseConfig) -> None:
+    """Backward-compatible alias for older tests/imports."""
+
+    _validate_accelerator_assignment(config)
 
 
 def _tool_schemas(path: str | None) -> tuple[dict[str, Any], ...]:
@@ -449,7 +478,9 @@ def build_app(config: ReleaseConfig):
         thinker_device = torch.device(next(bundle.model.parameters()).device)
         talker_device = torch.device(duplex.detached_talker_device)
         if talker_device.type != "cuda":
-            raise ValueError("duplex.detached_talker_device must be a CUDA device")
+            raise ValueError(
+                "duplex.detached_talker_device is currently supported only on CUDA"
+            )
         if thinker_device == talker_device:
             raise ValueError("Thinker and detached Talker must use different devices")
         detached_talker = DetachedTalkerRuntime.from_thinker_model(
@@ -588,8 +619,9 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     with AsrService(config.asr):
-        if config.server.cuda_visible_devices:
-            os.environ["CUDA_VISIBLE_DEVICES"] = config.server.cuda_visible_devices
+        server_visible = _server_visible_devices(config)
+        if server_visible:
+            os.environ[config.server.accelerator_visible_devices_env] = server_visible
         app = build_app(config)
 
         import uvicorn

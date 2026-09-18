@@ -26,6 +26,8 @@ class AsrConfig:
     model_path: str | None = None
     host: str = "127.0.0.1"
     port: int = 8995
+    accelerator_visible_devices: str | None = None
+    accelerator_visible_devices_env: str = "CUDA_VISIBLE_DEVICES"
     cuda_visible_devices: str | None = None
     device: Literal["auto", "cuda", "cpu"] = "cuda"
     device_index: int = 0
@@ -75,6 +77,8 @@ def validate_asr_config(config: AsrConfig) -> None:
         raise ValueError("asr.model_path is required when asr.mode is managed")
     if config.device_index < 0:
         raise ValueError("asr.device_index must not be negative")
+    if not config.accelerator_visible_devices_env:
+        raise ValueError("asr.accelerator_visible_devices_env must not be empty")
     if config.beam_size < 1:
         raise ValueError("asr.beam_size must be positive")
     if not 0 < config.vad_threshold < 1:
@@ -120,8 +124,13 @@ class AsrService:
                 "in use; stop that process or select asr.mode=external explicitly"
             )
         env = os.environ.copy()
-        if self.config.cuda_visible_devices is not None:
-            env["CUDA_VISIBLE_DEVICES"] = self.config.cuda_visible_devices
+        visible = (
+            self.config.accelerator_visible_devices
+            if self.config.accelerator_visible_devices is not None
+            else self.config.cuda_visible_devices
+        )
+        if visible is not None:
+            env[self.config.accelerator_visible_devices_env] = visible
         command = _managed_command(self.config)
         LOGGER.info("Starting managed ASR on %s", asr_base_url(self.config))
         self.process = subprocess.Popen(command, env=env)
