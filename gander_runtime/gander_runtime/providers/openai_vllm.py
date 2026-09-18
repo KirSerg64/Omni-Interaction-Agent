@@ -221,13 +221,15 @@ class _OpenAIVLLMRun:
         await self.cancel()
 
     async def _submit(self, instruction: str) -> None:
-        if self._terminal or self._closed:
-            raise RuntimeError("provider run is closed")
-        prior = self._active
+        async with self._lock:
+            if self._terminal or self._closed:
+                raise RuntimeError("provider run is closed")
+            prior = self._active
+            if prior is not None:
+                prior.cancel()
+            self._active = asyncio.create_task(self._run_completion(instruction))
         if prior is not None:
-            prior.cancel()
             await asyncio.gather(prior, return_exceptions=True)
-        self._active = asyncio.create_task(self._run_completion(instruction))
 
     async def _run_completion(self, instruction: str) -> None:
         await self._queue.put(
