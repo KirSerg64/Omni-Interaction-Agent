@@ -67,6 +67,8 @@ class DuplexConfig:
     talker_speech_tokens_per_unit: int = 25
     talker_final_speech_tokens_max: int = 0
     max_new_speak_tokens_per_chunk: int | None = None
+    duplex_backend: Literal["local", "vllm_omni"] | None = None
+    vllm_omni_duplex_class: str | None = None
     max_new_tool_tokens: int = 256
     max_tool_response_tokens: int = 256
     context_max_units: int = 128
@@ -195,6 +197,11 @@ def validate_release_config(config: ReleaseConfig) -> None:
         raise ValueError("detached Talker requires duplex.talker_checkpoint")
     if duplex.detached_talker_device and not config.model.token2wav_dir:
         raise ValueError("detached Talker requires model.token2wav_dir")
+    resolved_duplex_backend = duplex.duplex_backend or config.model.duplex_backend
+    if resolved_duplex_backend not in {"local", "vllm_omni"}:
+        raise ValueError("duplex_backend must be 'local' or 'vllm_omni'")
+    if duplex.detached_talker_device and resolved_duplex_backend != "local":
+        raise ValueError("detached Talker currently requires duplex_backend=local")
     if duplex.allow_client_video and not config.model.init_vision:
         raise ValueError("client video requires model.init_vision=true")
     if duplex.media_mode != "voice" and not config.model.init_vision:
@@ -413,6 +420,11 @@ def _duplex_params(config: DuplexConfig) -> DuplexParams:
         speak_text_tokens_per_unit=config.speak_text_tokens_per_unit,
         talker_speech_tokens_per_unit=config.talker_speech_tokens_per_unit,
         talker_final_speech_tokens_max=config.talker_final_speech_tokens_max,
+        duplex_backend=config.duplex_backend or "local",
+        vllm_omni_duplex_class=(
+            config.vllm_omni_duplex_class
+            or "vllm_omni.model_executor.models.minicpmo_4_5.duplex:MiniCPMODuplex"
+        ),
         max_new_speak_tokens_per_chunk=max_new_speak,
         max_new_tool_tokens=config.max_new_tool_tokens,
         max_tool_response_tokens=config.max_tool_response_tokens,
@@ -499,6 +511,16 @@ def build_app(config: ReleaseConfig):
             ),
         )
     params = _duplex_params(duplex)
+    if config.model.duplex_backend != "local" and duplex.duplex_backend is None:
+        params = replace(params, duplex_backend=config.model.duplex_backend)
+    if (
+        config.model.vllm_omni_duplex_class
+        and duplex.vllm_omni_duplex_class is None
+    ):
+        params = replace(
+            params,
+            vllm_omni_duplex_class=config.model.vllm_omni_duplex_class,
+        )
     settings = OnlineDuplexSettings(
         decode_mode=duplex.decode_mode,
         system_prompt=duplex.system_prompt,

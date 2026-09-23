@@ -10,6 +10,8 @@ model:
   token2wav_dir: null
   low_cpu_mem_usage: true
   device_map: null
+  duplex_backend: vllm_omni
+  vllm_omni_duplex_class: vllm_omni.model_executor.models.minicpmo_4_5.duplex:MiniCPMODuplex
 
 inference:
   mode: turn

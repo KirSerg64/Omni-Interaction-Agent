@@ -202,6 +202,10 @@ class ModelArguments:
     token2wav_enable_float16: bool = False
     low_cpu_mem_usage: bool = True
     device_map: str | None = None
+    duplex_backend: Literal["local", "vllm_omni"] = "local"
+    vllm_omni_duplex_class: str = (
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex:MiniCPMODuplex"
+    )
     train_disable_stream_input: bool = True
 
 

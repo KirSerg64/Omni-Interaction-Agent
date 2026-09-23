@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from importlib import import_module
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ _AS_DUPLEX_LOCK = threading.Lock()
 RuntimeWindowMode = Literal[
     "off", "basic", "context", "context_no_previous", "context_memory", "context_slate"
 ]
+DuplexBackend = Literal["local", "vllm_omni"]
 
 
 def _mask_generation_logits(
@@ -232,12 +234,17 @@ class DuplexParams:
     talker_speech_tokens_per_unit: int = 25
     # Zero lets the final unit continue to S3 EOS or the context limit.
     talker_final_speech_tokens_max: int = 0
+    duplex_backend: DuplexBackend = "local"
+    vllm_omni_duplex_class: str = (
+        "vllm_omni.model_executor.models.minicpmo_4_5.duplex:MiniCPMODuplex"
+    )
 
 
 class OnlineRunner:
     def __init__(self, bundle: InferBundle, params: DuplexParams | None = None) -> None:
         self.bundle = bundle
         self.params = params or DuplexParams()
+        self.duplex_backend: DuplexBackend = self.params.duplex_backend
         if self.params.speak_text_tokens_per_unit < 1:
             raise ValueError("speak_text_tokens_per_unit must be positive")
         minimum_speak_budget = self.params.speak_text_tokens_per_unit + 3
@@ -248,8 +255,6 @@ class OnlineRunner:
                 f"minimum={minimum_speak_budget}, "
                 f"actual={self.params.max_new_speak_tokens_per_chunk}"
             )
-        if not hasattr(bundle.model, "as_duplex"):
-            raise RuntimeError("Loaded model does not expose as_duplex()")
         duplex_kwargs = dict(self.params.__dict__)
         duplex_kwargs.pop("decode_mode")
         duplex_kwargs.pop("speak_text_tokens_per_unit")
@@ -266,6 +271,8 @@ class OnlineRunner:
         duplex_kwargs.pop("memory_soft_ratio")
         duplex_kwargs.pop("memory_hard_ratio")
         duplex_kwargs.pop("memory_kv_ceiling_units")
+        duplex_kwargs.pop("duplex_backend")
+        duplex_kwargs.pop("vllm_omni_duplex_class")
         requested_window_mode = duplex_kwargs["sliding_window_mode"]
         if requested_window_mode in {
             CONTEXT_NO_PREVIOUS,
@@ -276,7 +283,13 @@ class OnlineRunner:
             duplex_kwargs["sliding_window_mode"] = "context"
         if requested_window_mode == CONTEXT_NO_PREVIOUS:
             duplex_kwargs["context_previous_max_tokens"] = 0
-        self.duplex = _build_duplex(bundle.model, duplex_kwargs)
+        self.duplex = _build_duplex(
+            bundle.model,
+            duplex_kwargs,
+            backend=self.duplex_backend,
+            vllm_omni_duplex_class=self.params.vllm_omni_duplex_class,
+        )
+        self._ensure_duplex_contract()
         self.tool_schemas: list[dict[str, Any]] = []
         self.pinned_context: PinnedContextController | None = None
         self._configure_control_tokens()
@@ -409,7 +422,9 @@ class OnlineRunner:
         duplex._reset_streaming_state()
         decoder.reset()
         _reset_shared_model_streaming_session(duplex.model)
-        duplex.model.init_streaming_processor()
+        init_streaming_processor = getattr(duplex.model, "init_streaming_processor", None)
+        if callable(init_streaming_processor):
+            init_streaming_processor()
 
         decoder.cache = _clone_decoder_cache(snapshot.decoder_cache)
         for name, value in snapshot.decoder_state.items():
@@ -783,6 +798,12 @@ class OnlineRunner:
 
         tokenizer = self.bundle.tokenizer
         unk_id = tokenizer.unk_token_id
+        for name in ("chunk_speak_token_ids", "chunk_terminator_token_ids"):
+            if not hasattr(self.duplex, name):
+                raise RuntimeError(
+                    f"{self.duplex_backend} duplex backend is missing {name!r}; "
+                    "cannot apply Gander control-token grammar"
+                )
 
         def required(text: str) -> int:
             value = tokenizer.convert_tokens_to_ids(text)
@@ -830,6 +851,32 @@ class OnlineRunner:
         self.duplex._mcpmft_unit_end_token_id = self.unit_end_token_id
         if self.interrupt_token_id not in self.duplex.chunk_terminator_token_ids:
             self.duplex.chunk_terminator_token_ids.append(self.interrupt_token_id)
+
+    def _ensure_duplex_contract(self) -> None:
+        required = (
+            "streaming_prefill",
+            "streaming_generate",
+            "set_break_event",
+            "clear_break_event",
+            "is_session_stop_set",
+            "is_break_set",
+        )
+        missing = [name for name in required if not hasattr(self.duplex, name)]
+        if missing:
+            raise RuntimeError(
+                f"{self.duplex_backend} duplex backend is missing required API "
+                f"members: {', '.join(missing)}"
+            )
+        if not hasattr(self.duplex, "decoder"):
+            raise RuntimeError(
+                f"{self.duplex_backend} duplex backend does not expose decoder; "
+                "current task-tools/context-window integration requires decoder access"
+            )
+        if not hasattr(self.duplex, "model"):
+            raise RuntimeError(
+                f"{self.duplex_backend} duplex backend does not expose model; "
+                "current runtime requires shared model/session reset hooks"
+            )
 
     def _allowed_first_action_token_ids(self) -> tuple[int, ...]:
         ids = list(self.dialogue_continuation_forbidden_token_ids)
@@ -921,7 +968,9 @@ def _runtime_stop_requested(duplex: Any) -> bool:
 
 def _reset_shared_model_streaming_session(model: Any) -> None:
     """Clear base-model streaming caches that are not owned by MiniCPMODuplex."""
-    model.reset_session(reset_token2wav_cache=False)
+    reset = getattr(model, "reset_session", None)
+    if callable(reset):
+        reset(reset_token2wav_cache=False)
 
 
 def _decoder_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
@@ -945,16 +994,73 @@ def _decode_raw(tokenizer: Any, token_ids: Sequence[int]) -> str:
     )
 
 
-def _build_duplex(model, duplex_kwargs: dict):
+def _build_duplex(
+    model: Any,
+    duplex_kwargs: dict,
+    *,
+    backend: DuplexBackend,
+    vllm_omni_duplex_class: str,
+):
     """Construct upstream duplex without loading an unused token2wav stack in text-only mode."""
-    if duplex_kwargs.get("generate_audio", True):
-        return model.as_duplex(**duplex_kwargs)
-    with _AS_DUPLEX_LOCK:
-        model.init_tts = lambda *args, **kwargs: None
-        try:
+    if backend == "local":
+        if not hasattr(model, "as_duplex"):
+            raise RuntimeError("Loaded model does not expose as_duplex()")
+        if duplex_kwargs.get("generate_audio", True):
             return model.as_duplex(**duplex_kwargs)
-        finally:
-            delattr(model, "init_tts")
+        with _AS_DUPLEX_LOCK:
+            model.init_tts = lambda *args, **kwargs: None
+            try:
+                return model.as_duplex(**duplex_kwargs)
+            finally:
+                delattr(model, "init_tts")
+    if backend != "vllm_omni":
+        raise ValueError(f"unsupported duplex backend: {backend!r}")
+    factory = _load_duplex_factory(vllm_omni_duplex_class)
+    attempts = [
+        lambda: factory.from_model(model, **duplex_kwargs)  # type: ignore[attr-defined]
+        if hasattr(factory, "from_model")
+        else None,
+        lambda: factory(model=model, **duplex_kwargs),
+        lambda: factory(model, **duplex_kwargs),
+        lambda: factory(**duplex_kwargs),
+    ]
+    last_error: Exception | None = None
+    for attempt in attempts:
+        try:
+            value = attempt()
+            if value is not None:
+                return value
+        except TypeError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise RuntimeError(
+            "Unable to initialize vllm_omni duplex backend with the configured "
+            f"factory {vllm_omni_duplex_class!r}: {last_error}"
+        ) from last_error
+    raise RuntimeError(
+        f"Unable to initialize vllm_omni duplex backend with {vllm_omni_duplex_class!r}"
+    )
+
+
+def _load_duplex_factory(path: str) -> Any:
+    target = path.strip()
+    if not target:
+        raise ValueError("vllm_omni_duplex_class must not be empty")
+    module_name, sep, symbol_name = target.partition(":")
+    if not sep:
+        module_name, sep, symbol_name = target.rpartition(".")
+        if not sep:
+            raise ValueError(
+                "vllm_omni_duplex_class must be '<module>:<symbol>' or '<module>.<symbol>'"
+            )
+    module = import_module(module_name)
+    try:
+        return getattr(module, symbol_name)
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"duplex symbol {symbol_name!r} not found in module {module_name!r}"
+        ) from exc
 
 
 def iter_audio_chunks(
@@ -993,7 +1099,12 @@ def configure_duplex_talker_generation(
     if final_codes < 0:
         raise ValueError("talker_final_speech_tokens_max must be non-negative")
 
-    tts = duplex.model.tts
+    model = getattr(duplex, "model", None)
+    tts = getattr(model, "tts", None)
+    if tts is None:
+        raise RuntimeError(
+            "duplex backend does not expose model.tts; audio generation hooks are unavailable"
+        )
     tts._mcpmft_duplex_owner = duplex
     tts._mcpmft_speech_tokens_per_unit = unit_codes
     tts._mcpmft_final_speech_tokens_max = final_codes

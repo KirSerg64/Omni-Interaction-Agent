@@ -81,6 +81,8 @@ class DuplexConfig:
     memory_kv_ceiling_units: int | None = None
     talker_speech_tokens_per_unit: int = 25
     talker_final_speech_tokens_max: int = 0
+    duplex_backend: Literal["local", "vllm_omni"] | None = None
+    vllm_omni_duplex_class: str | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,13 @@ def _validate(model: ModelArguments, inference: InferenceConfig) -> None:
             raise ValueError(
                 "inference.duplex.talker_final_speech_tokens_max must be non-negative"
             )
+        if (
+            duplex.duplex_backend is not None
+            and duplex.duplex_backend not in {"local", "vllm_omni"}
+        ):
+            raise ValueError(
+                "inference.duplex.duplex_backend must be 'local' or 'vllm_omni'"
+            )
     if inference.generate_audio:
         if not model.init_tts or not model.token2wav_dir:
             raise ValueError(
@@ -266,7 +275,14 @@ def _run_duplex(config: OfflineConfig) -> dict[str, Any]:
         init_token2wav=False,
         load_processor=False,
     )
-    runner = OnlineRunner(bundle, _duplex_params(duplex, inference.generate_audio))
+    runner = OnlineRunner(
+        bundle,
+        _duplex_params(
+            config.model,
+            duplex,
+            inference.generate_audio,
+        ),
+    )
     runner.prepare(
         system_prompt=duplex.system_prompt,
         ref_audio_path=inference.input.ref_audio,
@@ -289,7 +305,11 @@ def _run_duplex(config: OfflineConfig) -> dict[str, Any]:
     return result
 
 
-def _duplex_params(config: DuplexConfig, generate_audio: bool) -> DuplexParams:
+def _duplex_params(
+    model: ModelArguments,
+    config: DuplexConfig,
+    generate_audio: bool,
+) -> DuplexParams:
     max_new_speak = (
         config.max_new_speak_tokens_per_chunk
         if config.max_new_speak_tokens_per_chunk is not None
@@ -325,6 +345,10 @@ def _duplex_params(config: DuplexConfig, generate_audio: bool) -> DuplexParams:
         memory_kv_ceiling_units=config.memory_kv_ceiling_units,
         talker_speech_tokens_per_unit=config.talker_speech_tokens_per_unit,
         talker_final_speech_tokens_max=config.talker_final_speech_tokens_max,
+        duplex_backend=config.duplex_backend or model.duplex_backend,
+        vllm_omni_duplex_class=(
+            config.vllm_omni_duplex_class or model.vllm_omni_duplex_class
+        ),
     )
 
 
