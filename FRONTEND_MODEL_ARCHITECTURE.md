@@ -305,9 +305,9 @@ This is the clearest place where a MiniCPM submodule is materialized separately 
 ## 6. Validation performed
 
 - Fetched `origin/main` locally and verified the current branch is based on it before writing this document.
-- Checked the cited runtime/training/loading source files directly in the repository checkout.
-- Inspected GitHub Actions runs and one job log via GitHub MCP as required by the CI/build-failure workflow instructions; the visible recent runs were successful/in-progress, with no repo-specific failure to diagnose.
-- No code changes were required; this update adds documentation only.
+- Checked that every repository-relative citation in this document points to an existing file and valid line range in the repository checkout.
+- The cited source files referenced here are unchanged relative to `origin/main`; this document adds repository-root documentation only.
+- No application code, dependency, or configuration behavior was changed by this update.
 
 ---
 
