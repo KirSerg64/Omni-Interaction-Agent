@@ -1267,7 +1267,7 @@ class StreamDecoder:
         if forbidden_token_ids is None:
             self.forbidden_token_ids = []
         elif isinstance(forbidden_token_ids, int):
-            self.forbidden_token_ids = [self.forbidden_token_ids]
+            self.forbidden_token_ids = [forbidden_token_ids]
         else:
             self.forbidden_token_ids = forbidden_token_ids
         self.forbidden_token_ids.append(self.chunk_eos_id)
